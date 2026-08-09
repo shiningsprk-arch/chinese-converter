@@ -6,7 +6,7 @@
 - 增强词表：a5566123s/Calibre-BIG5toGBK 个人修正版（繁体→简体，可选项）
 - EPUB 采用 zip 条目级无损处理（仅转换正文 HTML 与 OPF/NCX 标题文本，
   样式、图片、字体等原样保留）；TXT 自动探测编码后转换。
-- 输出方式：另存为新书入库（默认，保留原书）或替换原书（可选备份）。
+- 输出方式：另存为新书入库（默认，保留原书，完整继承原书元数据）或替换原书（可选备份）。
 
 @author: 黏菌, 2026
 """
@@ -17,7 +17,15 @@ import threading
 import traceback
 from typing import Optional
 
+from webserver import utils
+from webserver.constants import (
+    CALIBRE_COLUMN_CATEGORY,
+    CALIBRE_COLUMN_EXT_LINK,
+    CALIBRE_COLUMN_LOCATION,
+    CALIBRE_COLUMN_DYNAMIC_COVER,
+)
 from webserver.i18n import _
+from webserver.models import Item
 from webserver.services import AsyncService
 from webserver.services.background_service import BackgroundService, BackgroundTask
 from webserver.toolbox.base_tool import BaseTool
@@ -72,7 +80,7 @@ class ChineseConverterTool(BaseTool):
             "tool_id": "chinese_converter",
             "name": "繁简转换",
             "description": "对书库中的书籍执行简体↔繁体中文转换（支持 EPUB/TXT，6 种转换方向，可选增强词表），"
-                           "可另存为新书或替换原书（可选备份）",
+                           "可另存为新书（完整继承原书元数据）或替换原书（可选备份）",
             "revision": "0.1.0",
             "author": "黏菌",
             "publish_date": "2026-08-09",
@@ -162,13 +170,18 @@ class ChineseConverterTool(BaseTool):
 
             if mode == "replace":
                 new_book_id = self._replace_format(book_id, fmt, out_path, backup, work_dir)
-                self._set_language(new_book_id or book_id, direction)
+                target_id = new_book_id or book_id
+                if convert_title:
+                    self._apply_title_conversion(target_id, direction, engine)
+                else:
+                    self._set_language(target_id, direction)
                 self.add_msg(user_id, "success",
                              _("《%s》已转换为%s并替换原文件%s") % (
                                  book_title, self._direction_label(direction),
                                  _("（原文件已备份）") if backup else ""))
             else:
-                new_book_id = self._import_as_new_book(book_id, book, fmt, out_path, direction, user_id)
+                new_book_id = self._import_as_new_book(book_id, fmt, out_path, direction,
+                                                       convert_title, engine, user_id)
                 self.add_msg(user_id, "success",
                              _("《%s》已转换为%s并另存为新书，可在书库中查看") % (
                                  book_title, self._direction_label(direction)))
@@ -208,18 +221,89 @@ class ChineseConverterTool(BaseTool):
             pass
         return None
 
-    def _import_as_new_book(self, book_id: int, book: dict, fmt: str,
-                            out_path: str, direction: str, user_id: int) -> int:
-        """将转换产物另存为新书入库，返回新书 book_id。"""
-        title = book.get("title") or "Unknown"
+    def _import_as_new_book(self, book_id: int, fmt: str, out_path: str,
+                            direction: str, convert_title: bool, engine,
+                            user_id: int) -> int:
+        """将转换产物另存为新书入库，完整继承原书元数据（标签、系列、评分、
+        评论、语言、封面、自定义列等），返回新书 book_id。"""
+        # get_metadata 每次返回全新对象，可直接原地修改（勿 deepcopy，
+        # 其内部挂有指向 Cache 的代理，深拷贝不安全）
+        mi = self.db.get_metadata(book_id, index_is_id=True, get_cover=True)
+        cover_bytes = getattr(mi, "cover", None)
+
         suffix = NEW_BOOK_SUFFIX.get(DIRECTION_LANG.get(direction, "zh"), "（新版本）")
-        authors = book.get("authors") or []
-        if isinstance(authors, str):
-            authors = [authors]
-        new_book_id = self.import_file(user_id, out_path, title + suffix, list(authors))
+        title = (mi.title or "Unknown").strip()
+        if convert_title:
+            title = engine.convert(title)
+        mi.title = utils.super_strip(title) + suffix
+        mi.title_sort = utils.get_title_sort(mi.title)
+        if convert_title and mi.authors:
+            mi.authors = [engine.convert(a) for a in mi.authors]
+            mi.author_sort = None  # 名字已转换，排序键由 calibre 按新名字重算
+        mi.languages = [DIRECTION_LANG.get(direction, "zh")]
+        mi.uuid = None  # 新书应使用独立 UUID，避免与原书冲突
+        # calibre 的 add_books 仅通过 cover_data 写入封面，必须显式填充
+        if cover_bytes:
+            mi.cover_data = (None, cover_bytes)
+
+        new_book_id = self.db.import_book(mi, [out_path])
+        if new_book_id is None:
+            raise RuntimeError(_("导入文件失败，Calibre未返回书籍ID"))
+
+        try:
+            item = Item()
+            item.book_id = new_book_id
+            item.collector_id = user_id
+            item.save()
+        except Exception as err:
+            logging.error("[ChineseConverterTool] Failed to create Item record for book_id=%s: %s",
+                          new_book_id, err)
+
+        # 兜底：显式复制 MyBooks 自定义列（实体书类型/数量除外，
+        # 避免新书既有实体书标记又有格式文件的状态冲突）
+        for col in (CALIBRE_COLUMN_CATEGORY, CALIBRE_COLUMN_EXT_LINK,
+                    CALIBRE_COLUMN_LOCATION, CALIBRE_COLUMN_DYNAMIC_COVER):
+            try:
+                val = self.db.get_custom(book_id, label=col, index_is_id=True)
+            except Exception as err:
+                logging.warning("[ChineseConverterTool] Failed to read %s of book_id=%d: %s",
+                                col, book_id, err)
+                continue
+            if val in (None, ""):
+                continue
+            try:
+                self.db.new_api.set_field(col, {new_book_id: val})
+            except Exception as err:
+                logging.warning("[ChineseConverterTool] Failed to copy %s to new book_id=%d: %s",
+                                col, new_book_id, err)
+
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
         logging.info("[ChineseConverterTool] Imported converted %s as new book_id=%d (from %d)",
                      fmt, new_book_id, book_id)
         return new_book_id
+
+    def _apply_title_conversion(self, book_id: int, direction: str, engine) -> None:
+        """替换模式下同步库内标题/作者/语言（不加后缀），保持与转换后文件一致。
+        封面不受影响：set_metadata 只会更新提供的封面、从不删除现有封面。"""
+        try:
+            mi = self.db.get_metadata(book_id, index_is_id=True)
+            if mi.title:
+                mi.title = engine.convert(mi.title)
+            mi.title = mi.title or "Unknown"
+            mi.title_sort = utils.get_title_sort(mi.title)
+            if mi.authors:
+                mi.authors = [engine.convert(a) for a in mi.authors]
+                mi.author_sort = None  # 名字已转换，排序键由 calibre 按新名字重算
+            mi.languages = [DIRECTION_LANG.get(direction, "zh")]
+            self.db.set_metadata(book_id, mi, force_changes=True)
+            logging.info("[ChineseConverterTool] Updated title/authors/language for book_id=%d", book_id)
+        except Exception as err:
+            logging.warning("[ChineseConverterTool] Failed to update title for book_id=%d: %s",
+                            book_id, err)
 
     def _set_language(self, book_id: int, direction: str) -> None:
         lang = DIRECTION_LANG.get(direction, "zh")

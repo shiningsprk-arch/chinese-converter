@@ -25,7 +25,8 @@
 
 ### 3. EPUB 无损转换
 - zip 条目级处理：仅 `.html/.xhtml/.htm` 经 BeautifulSoup 转换文本节点
-  （跳过 script/style/noscript 子树）；`.opf/.ncx` 用 xml 解析转换标题类文本
+  （跳过 script/style/noscript 子树；CDATA 段整体原样保留——先占位摘出、转换后还原，
+  不参与繁简转换）；`.opf/.ncx` 用 xml 解析转换标题类文本
   （可由用户关闭）；其余条目（CSS/图片/字体/NCX）**字节级原样保留**
 - 重新打包符合 EPUB 规范：`mimetype` 置首且 `ZIP_STORED`，其余 `DEFLATED`
 - 保留 XML 声明（转换前记录、序列化后补回）
@@ -34,10 +35,14 @@
 - 编码自动探测：UTF-8（含 BOM）→ GB18030 → UTF-8 兜底；输出统一 UTF-8
 
 ### 5. 输出方式（默认另存为新书）
-- **另存为新书**：`import_file` 入库，标题加「（简体版）/（繁體版）」后缀，
-  作者保留，语言字段设为 `zh`（简体）或 `zht`（繁体）
+- **另存为新书**：基于原书 `get_metadata`（含封面）深拷贝后 `import_book` 入库，
+  完整继承标签、系列、评分、评论、语言、封面、MyBooks 自定义列（分类/外链/位置/动态封面）等元数据；
+  标题加「（简体版）/（繁體版）」后缀，`convert_title` 开启时标题与作者文本一并转换；
+  新书使用独立 UUID，语言设为 `zh`（简体）或 `zht`（繁体）；
+  实体书类型/数量列不复制，避免新书（带格式文件）状态冲突
 - **替换原书**：`add_format` 覆盖原格式（book_id 不变），可选备份原文件
-  到 `get_work_dir()` 工作目录
+  到 `get_work_dir()` 工作目录；`convert_title` 开启时同步更新库内
+  标题/作者/语言字段，与转换后文件保持一致
 
 ### 6. 后台任务
 - 与现有工具一致：`create_task` + 分阶段进度（reading → converting → saving，

@@ -196,6 +196,26 @@ def test_epub_metadata_off():
             assert "作为一个发展中的国家" in html
 
 
+def test_html_cdata_preserved():
+    # CDATA 段必须整体原样保留（标记 + 原始内容，不参与繁简转换），
+    # 正文普通文本照常转换
+    html = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        '<p>作為正文，包含繁體。</p>'
+        '<div><![CDATA[<raw 繁體 內容 & 数据>]]></div>'
+        '<script><![CDATA[var 測試 = "ok";]]></script>'
+        '</body></html>'
+    ).encode("utf-8")
+    oc = OpenCC("t2s")
+    out = epub_converter._convert_html_doc(html, oc.convert).decode("utf-8")
+    assert "作为正文，包含繁体。" in out
+    assert "<![CDATA[<raw 繁體 內容 & 数据>]]>" in out
+    assert '<![CDATA[var 測試 = "ok";]]>' in out
+    # 占位符不应泄漏到输出
+    assert "MYBOOKS_CDATA" not in out
+
+
 # ── TXT 测试 ──────────────────────────────────────────────────
 
 def test_txt_utf8_conversion():

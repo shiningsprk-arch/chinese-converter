@@ -5,7 +5,8 @@
 --------
 EPUB 本质是 ZIP 容器，这里采用“条目级”处理保证无损：
 - 仅对 ``.html/.xhtml/.htm`` 做 HTML 解析，转换所有文本节点
-  （跳过 ``script/style/noscript`` 子树，避免破坏脚本与样式）；
+  （跳过 ``script/style/noscript`` 子树，避免破坏脚本与样式；
+  CDATA 段整体原样保留——其内容属原始字节数据，不参与繁简转换）；
 - 对 OPF（``.opf``）与 NCX（``.ncx``）做 XML 解析，转换其中的标题类文本
   （``dc:title``、``navLabel`` 等）；
 - CSS、图片、字体等其余条目字节原样保留；
@@ -19,6 +20,7 @@ TXT 为纯文本：自动探测编码（UTF-8 → GB18030），转换后统一�
 """
 
 import os
+import re
 import zipfile
 
 from bs4 import BeautifulSoup
@@ -29,6 +31,33 @@ HTML_EXTS = (".html", ".xhtml", ".htm")
 XML_EXTS = (".opf", ".ncx")
 # 正文解析时跳过的子树（脚本 / 样式 / 注释区）
 SKIP_TAGS = {"script", "style", "noscript"}
+
+# CDATA 段匹配（XML 规范：以 ]]> 结束，内容中不可能再出现 ]]>）
+_CDATA_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
+# 提取 CDATA 时使用的占位符（正文中几乎不可能出现）
+_CDATA_TOKEN = "@@MYBOOKS_CDATA_%d@@"
+
+
+def _extract_cdata(text):
+    """用占位符替换所有 CDATA 段，返回 (处理后的文本, CDATA 内容列表)。
+
+    html.parser 不支持 CDATA：直接解析会把其内容当作普通文本并在序列化时
+    转义，丢失 ``<![CDATA[...]]>`` 标记。先摘出、后还原可保证原样保留。
+    """
+    parts = []
+
+    def _repl(m):
+        parts.append(m.group(1))
+        return _CDATA_TOKEN % (len(parts) - 1)
+
+    return _CDATA_RE.sub(_repl, text), parts
+
+
+def _restore_cdata(html, parts):
+    """把占位符还原为原始 CDATA 段（内容不经转换、字节级保留）。"""
+    for i, part in enumerate(parts):
+        html = html.replace(_CDATA_TOKEN % i, "<![CDATA[" + part + "]]>")
+    return html
 
 
 def convert_epub(epub_path, out_path, converter, convert_metadata=True, progress_cb=None):
@@ -74,13 +103,16 @@ def convert_epub(epub_path, out_path, converter, convert_metadata=True, progress
 
 
 def _convert_html_doc(data, converter):
-    """转换单个 HTML/XHTML 文档的所有文本节点。"""
+    """转换单个 HTML/XHTML 文档的所有文本节点（CDATA 段原样保留）。"""
     if not data.strip():
         return data
     text = data.decode("utf-8", errors="replace")
+    text, cdata_parts = _extract_cdata(text)
     soup = BeautifulSoup(text, "html.parser")
     _convert_text_nodes(soup, converter)
-    return soup.encode("utf-8")
+    html = soup.encode("utf-8").decode("utf-8")
+    html = _restore_cdata(html, cdata_parts)
+    return html.encode("utf-8")
 
 
 def _convert_xml_doc(data, converter):
