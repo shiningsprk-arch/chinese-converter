@@ -330,7 +330,7 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) not in (3, 4):
-        print("Usage: python -m webserver.toolbox.chinese_converter <direction> <epub|txt_path> [--a5]")
+        print("Usage: python -m webserver.toolbox.chinese_converter_tool <direction> <epub|txt_path> [--a5]")
         sys.exit(1)
 
     direction = sys.argv[1]

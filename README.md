@@ -35,7 +35,7 @@ webserver/
 ├── handlers/toolbox.py          (修改) +2 handler +2 路由
 └── toolbox/
     ├── toolset.py               (修改) import + register
-    ├── chinese_converter.py     (新增) Tool 类（BaseTool + 后台转换服务）
+    ├── chinese_converter_tool.py (新增) Tool 类（BaseTool + 后台转换服务）
     └── chinese_converter/       (新增) 核心包（standalone，可独立测试）
         ├── opencc_engine.py     移植 opencc-python 引擎（Apache 2.0）
         ├── epub_converter.py    EPUB/TXT 无损转换
@@ -64,14 +64,14 @@ cp -r tests/      <mybooks>/tests/
 `collect_tools()` 中新增两行：
 
 ```python
-from .chinese_converter import ChineseConverterTool        # import 区
+from .chinese_converter_tool import ChineseConverterTool        # import 区
 ...
 ToolSet.register(ChineseConverterTool.info())              # register 区
 ```
 
 ### 修改 2：`webserver/handlers/toolbox.py`
 
-1. import 区新增：`from webserver.toolbox.chinese_converter import ChineseConverterTool`
+1. import 区新增：`from webserver.toolbox.chinese_converter_tool import ChineseConverterTool`
 2. 新增 2 个 handler：`AdminChineseConverterConvert`（POST）、`AdminChineseConverterProgress`（GET）
 3. `routes()` 新增 2 条：
 
@@ -110,8 +110,8 @@ python tests/test_converter_core.py
 也可命令行试用转换效果：
 
 ```bash
-python -m webserver.toolbox.chinese_converter t2s some_book.epub --a5
-python -m webserver.toolbox.chinese_converter s2t some_book.txt
+python -m webserver.toolbox.chinese_converter_tool t2s some_book.epub --a5
+python -m webserver.toolbox.chinese_converter_tool s2t some_book.txt
 ```
 
 ## 上游与许可

@@ -52,7 +52,7 @@
 
 | 文件 | 类型 | 内容 |
 |------|------|------|
-| `webserver/toolbox/chinese_converter.py` | 新增 | Tool 类（BaseTool） |
+| `webserver/toolbox/chinese_converter_tool.py` | 新增 | Tool 类（BaseTool） |
 | `webserver/toolbox/chinese_converter/` | 新增 | 引擎 / EPUB 转换 / 词表 / 字典数据（standalone 包） |
 | `webserver/toolbox/toolset.py` | 修改 | +1 import +1 register |
 | `webserver/handlers/toolbox.py` | 修改 | +2 handler +2 路由 |

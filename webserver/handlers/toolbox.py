@@ -19,7 +19,7 @@ from webserver.toolbox.epub_split import EpubSplitTool
 from webserver.toolbox.author_clean_tool import AuthorCleanTool
 from webserver.toolbox.mimo_tts import MimoTTSTool
 from webserver.toolbox.bookbarn_acceptor_tool import BookBarnAcceptorTool
-from webserver.toolbox.chinese_converter import ChineseConverterTool
+from webserver.toolbox.chinese_converter_tool import ChineseConverterTool
 from webserver.services.background_service import BackgroundTask
 from pathlib import Path
 
