@@ -1,0 +1,749 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+import os
+import time
+import mimetypes
+import tornado
+
+from webserver.i18n import _
+from webserver.toolbox.toolset import ToolSet
+from webserver.handlers.base import BaseHandler, js, is_admin
+from urllib.parse import urlparse
+from webserver.toolbox.rare_book_downloader import RareBookDownloader
+from webserver.toolbox.merge_formats_tool import MergeFormatsTool
+from webserver.toolbox.review_book_language_tool import ReviewBookLanguageTool
+from webserver.toolbox.minify_pdf import MinifyPdfTool
+from webserver.toolbox.formats_pruning import FormatsPruningTool
+from webserver.toolbox.epub_fixer import EpubFixerTool
+from webserver.toolbox.epub_split import EpubSplitTool
+from webserver.toolbox.author_clean_tool import AuthorCleanTool
+from webserver.toolbox.mimo_tts import MimoTTSTool
+from webserver.toolbox.bookbarn_acceptor_tool import BookBarnAcceptorTool
+from webserver.toolbox.chinese_converter import ChineseConverterTool
+from webserver.services.background_service import BackgroundTask
+from pathlib import Path
+
+
+class AdminToolList(BaseHandler):
+    @js
+    @is_admin
+    def get(self):
+        ToolSet.collect_tools()
+        tools = [t.to_dict() for t in ToolSet.all_tools()]
+        return {"err": "ok", "tools": tools}
+
+
+class AdminRareBookDownloader(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        url = (data.get("url") or "").strip()
+        if not url:
+            return {"err": "params.url.missing", "msg": _("请提供URL参数")}
+
+        host = urlparse(url).hostname or ""
+        if host != "hkust.edu.hk" and not host.endswith(".hkust.edu.hk"):
+            return {"err": "params.url.unsupported", "msg": _("不支持的URL，仅支持 hkust.edu.hk 及其子域名")}
+
+        RareBookDownloader().download(url, self.user_id())
+        return {"err": "ok", "msg": _("古书下载任务已启动，右上角可以查看进度")}
+
+
+class AdminMergeFormatsMerge(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        source_id = data.get("source_id")
+        target_id = data.get("target_id")
+
+        if not source_id or not target_id:
+            return {"err": "params.missing", "msg": _("请提供来源书籍ID和目标书籍ID")}
+
+        try:
+            result = MergeFormatsTool().merge(int(source_id), int(target_id))
+        except RuntimeError as err:
+            return {"err": "merge.failed", "msg": str(err)}
+
+        return {
+            "err": "ok",
+            "msg": _("合并成功，已添加格式：%s") % "、".join(result["added_formats"]),
+            "added_formats": result["added_formats"],
+            "deleted_book_id": result["deleted_book_id"],
+        }
+
+
+class AdminReviewBookLanguage(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        ReviewBookLanguageTool().review(self.user_id())
+        return {"err": "ok", "msg": _("书名语言检测任务已启动，右上角可以查看进度")}
+
+
+class AdminMinifyPdfUpload(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        if not self.request.files or 'file' not in self.request.files:
+            return {"err": "params.missing", "msg": _("未上传文件")}
+
+        file_meta = self.request.files['file'][0]
+        ext = os.path.splitext(file_meta['filename'])[1]
+
+        tool = MinifyPdfTool()
+        work_dir = tool.get_work_dir("")
+        sources_dir = os.path.join(work_dir, "sources")
+        os.makedirs(sources_dir, exist_ok=True)
+
+        filename = f"{int(time.time())}{ext}"
+        filepath = os.path.join(sources_dir, filename)
+
+        with open(filepath, 'wb+') as f:
+            f.write(file_meta['body'])
+
+        pdf_info = MinifyPdfTool.get_pdf_info(filepath)
+        data = {"filename": filename}
+        data.update(pdf_info)
+
+        # data中包含的信息：
+        # page_count: 页数
+        # file_size: 文件大小
+        # page_width: 页宽
+        # page_height: 页高
+        return {"err": "ok", "data": data}
+
+
+class AdminMinifyPdfProcess(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        filename = data.get("filename")
+        if not filename:
+            return {"err": "params.missing", "msg": _("请提供文件名")}
+
+        tool = MinifyPdfTool()
+        if tool.is_running():
+            return {"err": "task.running", "msg": _("已有PDF瘦身任务正在运行，请稍后再试")}
+
+        work_dir = tool.get_work_dir("")
+        input_pdf = os.path.join(work_dir, "sources", filename)
+
+        if not os.path.exists(input_pdf):
+            return {"err": "file.not_found", "msg": _("未找到上传的文件")}
+
+        # params 为参数字典，支持以下字段（类型 / 含义 / 默认值）：
+        # - max_width: int值，页面渲染时的最大宽度（像素）。默认800。
+        # - bw: bool，是否将页面转换为二值（黑白）图像（使用 Otsu 阈值）。默认 False；bw 优先于 gray。
+        # - gray: bool，是否将页面转换为灰度图像（L 模式）。默认 False。
+        # - auto: bool，是否对比度自动校正（基于直方图）。默认 False。
+        # - skip_pages: str，逗号分隔的页码（以 1 为起点），支持负数从末尾索引。指定的页不会应用 bw/gray/auto/max_brightness 等处理，但仍保留在输出中。
+        # - drop_pages: str，逗号分隔的页码（以 1 为起点），支持负数，从输出中完全删除这些页。
+        # - qualify: int，JPEG 重编码质量（1-100），用于控制压缩质量，默认 75。
+        # - max_brightness: int 或 None，0-255 范围，配合 gray 使用，将亮度高于该值的像素设为白色以去除背景噪点。默认 None（不处理）。
+        # 示例：{"max_width":800, "bw":True, "qualify":60, "drop_pages":"1,3", "skip_pages":"5"}
+        tool.minify(input_pdf, data.get("params", {}), self.user_id())
+        return {"err": "ok", "msg": _("PDF瘦身任务已启动")}
+
+
+class AdminMinifyPdfProgress(BaseHandler):
+    @js
+    @is_admin
+    def get(self):
+        filename = self.get_argument("filename", "")
+        if not filename:
+            return {"err": "params.missing", "msg": _("请提供文件名")}
+
+        tool = MinifyPdfTool()
+        work_dir = tool.get_work_dir("")
+        input_pdf = os.path.join(work_dir, "sources", filename)
+
+        task_info = tool.get_task_info(input_pdf)
+        if task_info:
+            if task_info.get("status") == "running":
+                return {
+                    "err": "ok",
+                    "data": {
+                        "progress": task_info.get("progress", 0),
+                        "status": "running"
+                    }
+                }
+            elif task_info.get("status") == "completed":
+                return {
+                    "err": "ok",
+                    "msg": _("文件处理完成"),
+                    "data": {
+                        "progress": 100,
+                        "status": "completed",
+                        "download_url": f"/api/toolbox/minify_pdf/download?filename={filename}"
+                    }
+                }
+            elif task_info.get("status") == "error":
+                return {"err": "task.failed", "msg": task_info.get("message", _("处理失败"))}
+
+        stem = Path(input_pdf).stem
+        processed_pdf = os.path.join(work_dir, "processed", f"{stem}_minify.pdf")
+
+        if os.path.exists(processed_pdf):
+            return {
+                "err": "ok",
+                "msg": _("文件处理完成"),
+                "data": {
+                    "progress": 100,
+                    "status": "completed",
+                    "download_url": f"/api/toolbox/minify_pdf/download?filename={filename}"
+                }
+            }
+
+        return {"err": "task.interrupted", "msg": _("任务已中断")}
+
+
+class AdminMinifyPdfDownload(BaseHandler):
+    @is_admin
+    def get(self):
+        from webserver.toolbox.minify_pdf import MinifyPdfTool
+        import os
+        from pathlib import Path
+
+        filename = self.get_argument("filename", "")
+        if not filename:
+            self.set_status(400)
+            self.write("Missing filename")
+            return
+
+        tool = MinifyPdfTool()
+        work_dir = tool.get_work_dir("")
+        stem = Path(filename).stem
+        processed_pdf = os.path.join(work_dir, "processed", f"{stem}_minify.pdf")
+
+        if not os.path.exists(processed_pdf):
+            self.set_status(404)
+            self.write("File not found")
+            return
+
+        self.set_header('Content-Type', 'application/pdf')
+        self.set_header('Content-Disposition', f'attachment; filename="{stem}_minify.pdf"')
+        with open(processed_pdf, 'rb') as f:
+            self.write(f.read())
+
+
+class AdminFormatsPruningStart(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        delete = data.get("delete")
+        if not isinstance(delete, list) or not delete:
+            return {"err": "params.missing", "msg": _("请至少选择一种需要删除的格式")}
+
+        valid_keys = set(FormatsPruningTool.FORMAT_GROUPS.keys())
+        delete_keys = [k for k in delete if k in valid_keys]
+        if not delete_keys:
+            return {"err": "params.invalid", "msg": _("无效的格式选项")}
+
+        if len(set(delete_keys)) >= len(valid_keys):
+            return {"err": "params.invalid", "msg": _("不能选择全部格式，请至少取消勾选一项以便保留")}
+
+        tool = FormatsPruningTool()
+        if tool.is_running():
+            return {"err": "task.running", "msg": _("已有格式精简任务正在运行，请稍后再试")}
+
+        tool.prune(delete_keys, self.user_id())
+        return {"err": "ok", "msg": _("格式精简任务已启动，右上角可以查看进度")}
+
+
+class AdminFormatsPruningProgress(BaseHandler):
+    @js
+    @is_admin
+    def get(self):
+        task = FormatsPruningTool.get_last_task()
+        if not task:
+            return {"err": "task.not_found", "msg": _("尚未启动格式精简任务")}
+
+        progress_data = task.get("progress_data") or {}
+        result = {
+            "status": task.get("status"),
+            "progress": task.get("progress", 0),
+            "total": progress_data.get("total", 0),
+            "checked": progress_data.get("checked", 0),
+            "pruned_books": progress_data.get("pruned_books", 0),
+            "pruned_formats": progress_data.get("pruned_formats", 0),
+        }
+
+        if task.get("status") == BackgroundTask.STATUS_FAILED:
+            return {"err": "task.failed", "msg": task.get("error_message") or _("处理失败"), "data": result}
+
+        if task.get("status") == BackgroundTask.STATUS_COMPLETED:
+            return {"err": "ok", "msg": _("格式精简任务已完成"), "data": result}
+
+        return {"err": "ok", "data": result}
+
+
+class AdminEpubFixerFix(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        book_id = data.get("book_id")
+        backup = bool(data.get("backup", False))
+
+        if not book_id:
+            return {"err": "params.missing", "msg": _("请提供书籍ID")}
+
+        tool = EpubFixerTool()
+        if tool.is_running():
+            return {"err": "task.running", "msg": _("已有 EPUB 修复任务正在执行，请稍后再试")}
+
+        tool.fix(int(book_id), backup, self.user_id())
+        return {"err": "ok", "msg": _("EPUB修复任务已启动,不要重复执行,注意查看消息通知中的处理结果")}
+
+
+class AdminEpubSplitChapters(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        book_id = data.get("book_id")
+        if not book_id:
+            return {"err": "params.missing", "msg": _("请提供书籍ID")}
+
+        try:
+            result = EpubSplitTool().list_chapters(int(book_id))
+        except RuntimeError as err:
+            return {"err": "epub_split.failed", "msg": str(err)}
+
+        return {"err": "ok", "data": result}
+
+
+class AdminEpubSplitGenerate(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        book_id = data.get("book_id")
+        linenums = data.get("chapters")
+        use_first_chapter_cover = bool(data.get("use_first_chapter_cover", False))
+
+        if not book_id:
+            return {"err": "params.missing", "msg": _("请提供书籍ID")}
+        if not isinstance(linenums, list) or not linenums:
+            return {"err": "params.missing", "msg": _("请至少选择一个章节")}
+
+        try:
+            result = EpubSplitTool().split(int(book_id), linenums, use_first_chapter_cover, self.user_id())
+        except RuntimeError as err:
+            return {"err": "epub_split.failed", "msg": str(err)}
+
+        return {"err": "ok", "msg": _("新书生成成功"), "data": result}
+
+
+class AdminAuthorClean(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        action = (data.get("action") or "").strip()
+        author_name = (data.get("author_name") or "").strip()
+        new_author_name = (data.get("new_author_name") or "").strip()
+
+        if not author_name:
+            return {"err": "params.author_name.missing", "msg": _("请提供现有作者名称")}
+
+        if action == "clean":
+            AuthorCleanTool().clean(author_name, self.user_id())
+            return {"err": "ok", "msg": _("作者清理任务已启动，右上角可以查看进度")}
+        elif action == "replace":
+            if not new_author_name:
+                return {"err": "params.new_author_name.missing", "msg": _("请提供新的作者名称")}
+            if not AuthorCleanTool.validate_new_author_name(new_author_name):
+                return {
+                    "err": "params.new_author_name.invalid",
+                    "msg": _("新作者名称仅允许使用字母、数字、“.”和“·”，不能包含空格、引号等其他符号"),
+                }
+            AuthorCleanTool().replace(author_name, new_author_name, self.user_id())
+            return {"err": "ok", "msg": _("作者替换任务已启动，右上角可以查看进度")}
+        else:
+            return {"err": "params.action.invalid", "msg": _("无效的操作类型")}
+
+
+class AdminMimoTTSConvert(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        book_id = data.get("book_id")
+        api_key = (data.get("api_key") or "").strip()
+        voice_desc = (data.get("voice_desc") or "").strip()
+        api_url = (data.get("api_url") or "").strip()
+        model_name = (data.get("model_name") or "").strip()
+        api_type = (data.get("api_type") or "chat_completions").strip()
+        voice_name = (data.get("voice_name") or "").strip()
+        auth_type = (data.get("auth_type") or "api-key").strip()
+        clone_voice = (data.get("clone_voice") or "").strip()
+
+        if not book_id:
+            return {"err": "params.missing", "msg": _("请提供书籍ID")}
+        if not api_key:
+            return {"err": "params.missing", "msg": _("请提供 API Key")}
+        if not api_url:
+            if api_type == "custom":
+                return {"err": "params.missing", "msg": _("自定义类型请填写 API URL")}
+            api_url = "https://api.openai.com/v1/audio/speech" if api_type == "audio_speech" else "https://api.xiaomimimo.com/v1/chat/completions"
+        if not model_name:
+            if api_type == "custom":
+                return {"err": "params.missing", "msg": _("自定义类型请填写模型名称")}
+            if api_type == "audio_speech":
+                model_name = "tts-1"
+            else:
+                model_name = "mimo-v2.5-tts"
+        if api_type == "chat_completions":
+            model_name = "mimo-v2.5-tts"
+        if clone_voice:
+            if api_type != "chat_completions":
+                return {"err": "params.invalid", "msg": _("音色克隆仅支持 MiMo TTS 类型 API")}
+            if not MimoTTSTool().get_clone_voice_path(clone_voice):
+                return {"err": "clone.not_found", "msg": _("克隆音色「%s」不存在，请重新上传") % clone_voice}
+            model_name = "mimo-v2.5-tts-voiceclone"
+        if api_type == "chat_completions" and not voice_desc:
+            voice_desc = "自然平和的语调，语速适中，咬字清晰"
+        if api_type == "audio_speech" and not voice_name:
+            voice_name = "alloy"
+
+        tool = MimoTTSTool()
+        if tool.is_running():
+            return {"err": "task.running", "msg": _("已有 TTS 转换任务正在运行，请稍后再试")}
+
+        # audio_speech 模式下 voice_desc 无意义，传空字符串避免混淆
+        effective_voice_desc = voice_desc if api_type in ("chat_completions", "custom") else ""
+        tool.convert(int(book_id), api_key, effective_voice_desc, self.user_id(),
+                     api_url, model_name, api_type, voice_name, auth_type,
+                     clone_voice)
+        return {"err": "ok", "msg": _("TTS 转换任务已启动，右上角可以查看进度")}
+
+
+class AdminMimoTTSConfig(BaseHandler):
+    @js
+    @is_admin
+    def get(self):
+        config = MimoTTSTool().load_api_config()
+        if config:
+            return {"err": "ok", "config": config}
+        return {"err": "ok", "config": None}
+
+    @js
+    @is_admin
+    def delete(self):
+        MimoTTSTool().clear_api_config()
+        return {"err": "ok", "msg": _("已清除已保存的配置")}
+
+
+class AdminMimoTTSProgress(BaseHandler):
+    @js
+    @is_admin
+    def get(self):
+        task = MimoTTSTool.get_last_task()
+        if not task:
+            return {"err": "task.not_found", "msg": _("尚未启动 TTS 转换任务")}
+
+        progress_data = task.get("progress_data") or {}
+        result = {
+            "status": task.get("status"),
+            "progress": task.get("progress", 0),
+            "book_id": progress_data.get("book_id", 0),
+            "stage": progress_data.get("stage", ""),
+            "chapter": progress_data.get("chapter", 0),
+            "total": progress_data.get("total", 0),
+            "chapter_title": progress_data.get("chapter_title", ""),
+        }
+
+        if task.get("status") == BackgroundTask.STATUS_FAILED:
+            return {"err": "task.failed", "msg": task.get("error_message") or _("处理失败"), "data": result}
+
+        if task.get("status") == BackgroundTask.STATUS_COMPLETED:
+            return {"err": "ok", "msg": _("TTS 转换任务已完成"), "data": result}
+
+        return {"err": "ok", "data": result}
+
+
+class AdminMimoTTSTest(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        api_key = (data.get("api_key") or "").strip()
+        voice_desc = (data.get("voice_desc") or "").strip()
+        api_url = (data.get("api_url") or "").strip()
+        model_name = (data.get("model_name") or "").strip()
+        api_type = (data.get("api_type") or "chat_completions").strip()
+        voice_name = (data.get("voice_name") or "").strip()
+        auth_type = (data.get("auth_type") or "api-key").strip()
+        clone_voice = (data.get("clone_voice") or "").strip()
+
+        if not api_key:
+            return {"err": "params.missing", "msg": _("请提供 API Key")}
+        if not api_url:
+            return {"err": "params.missing", "msg": _("请填写 API URL")}
+        if not model_name:
+            return {"err": "params.missing", "msg": _("请填写模型名称")}
+        if api_type == "chat_completions":
+            model_name = "mimo-v2.5-tts"
+        if clone_voice:
+            if not MimoTTSTool().get_clone_voice_path(clone_voice):
+                return {"err": "clone.not_found", "msg": _("克隆音色「%s」不存在，请重新上传") % clone_voice}
+            model_name = "mimo-v2.5-tts-voiceclone"
+        if api_type == "chat_completions" and not voice_desc:
+            voice_desc = "自然平和的语调，语速适中，咬字清晰"
+        if api_type == "audio_speech" and not voice_name:
+            voice_name = "alloy"
+
+        ok, err_msg = MimoTTSTool().test_connection(
+            api_key, voice_desc, api_url, model_name, api_type, voice_name, auth_type,
+            clone_voice)
+        if ok:
+            return {"err": "ok", "msg": _("连接成功，配置已保存")}
+        return {"err": "test.failed", "msg": _("连接失败：%s") % err_msg}
+
+
+class AdminMimoTTSCloneUpload(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        if not self.request.files or 'file' not in self.request.files:
+            return {"err": "params.missing", "msg": _("未上传文件")}
+
+        file_meta = self.request.files['file'][0]
+        voice_name = (self.get_body_argument("voice_name", "") or "").strip()
+        ext = os.path.splitext(file_meta['filename'])[1].lower()
+
+        tool = MimoTTSTool()
+        try:
+            name = tool.save_clone_voice(voice_name, ext, file_meta['body'])
+        except ValueError as err:
+            return {"err": "params.invalid", "msg": str(err)}
+
+        return {"err": "ok", "msg": _("克隆音色「%s」上传成功") % name, "data": {"name": name}}
+
+
+class AdminMimoTTSCloneList(BaseHandler):
+    @js
+    @is_admin
+    def get(self):
+        clones = MimoTTSTool().list_clone_voices()
+        return {"err": "ok", "clones": clones}
+
+
+class AdminMimoTTSCloneDelete(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        voice_name = (data.get("voice_name") or "").strip()
+        if not voice_name:
+            return {"err": "params.missing", "msg": _("请提供克隆音色名称")}
+
+        if MimoTTSTool().delete_clone_voice(voice_name):
+            return {"err": "ok", "msg": _("克隆音色「%s」已删除") % voice_name}
+        return {"err": "clone.not_found", "msg": _("克隆音色「%s」不存在") % voice_name}
+
+
+class AdminMimoTTSCloneAudio(BaseHandler):
+    @is_admin
+    def get(self):
+        voice_name = self.get_argument("voice_name", "").strip()
+        path = MimoTTSTool().get_clone_voice_path(voice_name)
+        if not path:
+            self.set_status(404)
+            self.write("Clone voice not found")
+            return
+
+        mime = mimetypes.guess_type(path)[0] or "audio/wav"
+        self.set_header("Content-Type", mime)
+        self.set_header("Cache-Control", "no-store")
+        with open(path, "rb") as f:
+            self.write(f.read())
+
+
+class AdminMimoTTSPromptList(BaseHandler):
+    @js
+    @is_admin
+    def get(self):
+        prompts = MimoTTSTool().list_voice_prompts()
+        return {"err": "ok", "prompts": prompts}
+
+
+class AdminMimoTTSPromptSave(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        name = (data.get("name") or "").strip()
+        desc = (data.get("desc") or "").strip()
+        if not name or not desc:
+            return {"err": "params.missing", "msg": _("请填写提示词名称和内容")}
+
+        try:
+            saved = MimoTTSTool().save_voice_prompt(name, desc)
+        except ValueError as err:
+            return {"err": "params.invalid", "msg": str(err)}
+        return {"err": "ok", "msg": _("提示词「%s」已保存") % saved, "data": {"name": saved}}
+
+
+class AdminMimoTTSPromptDelete(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        name = (data.get("name") or "").strip()
+        if not name:
+            return {"err": "params.missing", "msg": _("请提供提示词名称")}
+
+        if MimoTTSTool().delete_voice_prompt(name):
+            return {"err": "ok", "msg": _("提示词「%s」已删除") % name}
+        return {"err": "prompt.not_found", "msg": _("提示词「%s」不存在") % name}
+
+
+class AdminBookBarnAcceptorStatus(BaseHandler):
+    @js
+    @is_admin
+    def get(self):
+        return {"err": "ok", "data": BookBarnAcceptorTool().get_status()}
+
+
+class AdminChineseConverterConvert(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        book_id = data.get("book_id")
+        direction = (data.get("direction") or "t2s").strip()
+        mode = (data.get("mode") or "book").strip()
+        use_a5 = bool(data.get("use_a5", True))
+        convert_title = bool(data.get("convert_title", True))
+        backup = bool(data.get("backup", False))
+
+        if not book_id:
+            return {"err": "params.missing", "msg": _("请提供书籍ID")}
+        if direction not in ChineseConverterTool.DIRECTIONS:
+            return {"err": "params.direction.invalid", "msg": _("不支持的转换方向")}
+        if mode not in ("book", "replace"):
+            return {"err": "params.mode.invalid", "msg": _("无效的输出方式")}
+
+        tool = ChineseConverterTool()
+        if tool.is_running():
+            return {"err": "task.running", "msg": _("已有繁简转换任务正在运行，请稍后再试")}
+
+        tool.convert(int(book_id), direction, mode, use_a5, convert_title, backup, self.user_id())
+        return {"err": "ok", "msg": _("繁简转换任务已启动，右上角可以查看进度")}
+
+
+class AdminChineseConverterProgress(BaseHandler):
+    @js
+    @is_admin
+    def get(self):
+        task = ChineseConverterTool.get_last_task()
+        if not task:
+            return {"err": "task.not_found", "msg": _("尚未启动繁简转换任务")}
+
+        progress_data = task.get("progress_data") or {}
+        result = {
+            "status": task.get("status"),
+            "progress": task.get("progress", 0),
+            "book_id": progress_data.get("book_id", 0),
+            "new_book_id": progress_data.get("new_book_id", 0),
+            "direction": progress_data.get("direction", ""),
+            "stage": progress_data.get("stage", ""),
+        }
+
+        if task.get("status") == BackgroundTask.STATUS_FAILED:
+            return {"err": "task.failed", "msg": task.get("error_message") or _("处理失败"), "data": result}
+
+        if task.get("status") == BackgroundTask.STATUS_COMPLETED:
+            return {"err": "ok", "msg": _("繁简转换任务已完成"), "data": result}
+
+        return {"err": "ok", "data": result}
+
+
+class AdminBookBarnAcceptorToggle(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        enabled = bool(data.get("enabled", False))
+
+        result = BookBarnAcceptorTool().set_receiving_books(enabled)
+        if result.get("err") != "ok":
+            return result
+
+        return {"err": "ok", "msg": result.get("msg"), "data": BookBarnAcceptorTool().get_status()}
+
+
+class AdminBookBarnAcceptorApplyToken(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        try:
+            token = BookBarnAcceptorTool().apply_token(self.get_os())
+        except Exception as err:
+            return {"err": "params.error", "msg": _("Token申请失败: %s") % str(err)}
+        return {"err": "ok", "msg": _("Token申请成功"), "token": token}
+
+
+class AdminBookBarnAcceptorSetCollectionHour(BaseHandler):
+    @js
+    @is_admin
+    def post(self):
+        data = tornado.escape.json_decode(self.request.body)
+        hour = data.get("hour")
+
+        try:
+            hour = int(hour)
+        except (TypeError, ValueError):
+            return {"err": "params.missing", "msg": _("未提供有效的小时数")}
+
+        try:
+            result = BookBarnAcceptorTool().set_collection_hour(hour)
+        except ValueError:
+            return {"err": "params.invalid", "msg": _("小时数应为0-23之间的整数")}
+
+        if result.get("err") != "ok":
+            return result
+
+        return {"err": "ok", "msg": result.get("msg"), "data": BookBarnAcceptorTool().get_status()}
+
+
+def routes():
+    return [
+                (r"/api/toolbox/list", AdminToolList),
+                (r"/api/toolbox/rare_book_downloader", AdminRareBookDownloader),
+                (r"/api/toolbox/merge_formats/merge", AdminMergeFormatsMerge),
+                (r"/api/toolbox/review_book_language", AdminReviewBookLanguage),
+                (r"/api/toolbox/minify_pdf/upload", AdminMinifyPdfUpload),
+                (r"/api/toolbox/minify_pdf/process", AdminMinifyPdfProcess),
+                (r"/api/toolbox/minify_pdf/progress", AdminMinifyPdfProgress),
+                (r"/api/toolbox/minify_pdf/download", AdminMinifyPdfDownload),
+                (r"/api/toolbox/formats_pruning/start", AdminFormatsPruningStart),
+                (r"/api/toolbox/formats_pruning/progress", AdminFormatsPruningProgress),
+                (r"/api/toolbox/epub_fixer/fix", AdminEpubFixerFix),
+                (r"/api/toolbox/epub_split/chapters", AdminEpubSplitChapters),
+                (r"/api/toolbox/epub_split/generate", AdminEpubSplitGenerate),
+                (r"/api/toolbox/author_clean", AdminAuthorClean),
+                (r"/api/toolbox/bookbarn_acceptor/status", AdminBookBarnAcceptorStatus),
+                (r"/api/toolbox/bookbarn_acceptor/toggle", AdminBookBarnAcceptorToggle),
+                (r"/api/toolbox/bookbarn_acceptor/apply_token", AdminBookBarnAcceptorApplyToken),
+                (r"/api/toolbox/bookbarn_acceptor/set_collection_hour", AdminBookBarnAcceptorSetCollectionHour),
+                (r"/api/toolbox/mimo_tts/convert", AdminMimoTTSConvert),
+                (r"/api/toolbox/mimo_tts/progress", AdminMimoTTSProgress),
+                (r"/api/toolbox/mimo_tts/config", AdminMimoTTSConfig),
+                (r"/api/toolbox/mimo_tts/test", AdminMimoTTSTest),
+                (r"/api/toolbox/mimo_tts/clone/upload", AdminMimoTTSCloneUpload),
+                (r"/api/toolbox/mimo_tts/clone/list", AdminMimoTTSCloneList),
+                (r"/api/toolbox/mimo_tts/clone/delete", AdminMimoTTSCloneDelete),
+                (r"/api/toolbox/mimo_tts/clone/audio", AdminMimoTTSCloneAudio),
+                (r"/api/toolbox/mimo_tts/prompt/list", AdminMimoTTSPromptList),
+                (r"/api/toolbox/mimo_tts/prompt/save", AdminMimoTTSPromptSave),
+                (r"/api/toolbox/mimo_tts/prompt/delete", AdminMimoTTSPromptDelete),
+                (r"/api/toolbox/chinese_converter/convert", AdminChineseConverterConvert),
+                (r"/api/toolbox/chinese_converter/progress", AdminChineseConverterProgress),
+    ]
