@@ -306,7 +306,7 @@ export default {
       try {
         const rsp = await this.$backend('/toolbox/chinese_converter/progress');
         if (rsp.err === 'task.not_found') {
-          // 任务尚未创建，短时等待；连续多次（约 30s）仍找不到视为任务丢失
+          // 任务尚未创建，短时等待；未取到状态累计约 30s 视为任务丢失
           this.pollRetries += 1;
           if (this.pollRetries > 15) {
             this.stopPollingWithError('chineseConverter.pollLost');

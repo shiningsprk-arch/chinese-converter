@@ -19,7 +19,7 @@ from webserver.toolbox.epub_split import EpubSplitTool
 from webserver.toolbox.author_clean_tool import AuthorCleanTool
 from webserver.toolbox.mimo_tts import MimoTTSTool
 from webserver.toolbox.bookbarn_acceptor_tool import BookBarnAcceptorTool
-from webserver.toolbox.chinese_converter_tool import ChineseConverterTool
+from webserver.toolbox.chinese_converter_tool import ChineseConverterTool, DIRECTIONS
 from webserver.services.background_service import BackgroundTask
 from pathlib import Path
 
@@ -625,7 +625,7 @@ class AdminChineseConverterConvert(BaseHandler):
 
         if not book_id:
             return {"err": "params.missing", "msg": _("请提供书籍ID")}
-        if direction not in ChineseConverterTool.DIRECTIONS:
+        if direction not in DIRECTIONS:
             return {"err": "params.direction.invalid", "msg": _("不支持的转换方向")}
         if mode not in ("book", "replace"):
             return {"err": "params.mode.invalid", "msg": _("无效的输出方式")}

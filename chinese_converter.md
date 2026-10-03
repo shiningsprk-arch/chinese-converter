@@ -60,7 +60,7 @@
 | `webserver/handlers/toolbox.py` | 修改 | +2 handler +2 路由 |
 | `app/src/pages/toolbox/chinese_converter.vue` | 新增 | Vuetify 2 页面 |
 | `app/locales/{en,zh,zh-TW}.json` | 修改 | +`chineseConverter` 块 |
-| `tests/test_converter_core.py` | 新增 | 16 个单元测试（standalone） |
+| `tests/test_converter_core.py` | 新增 | 27 个单元测试（standalone） |
 
 ## 三、接口
 
@@ -91,7 +91,7 @@
 ## 六、测试
 
 ```bash
-python tests/test_converter_core.py   # 20/20 passed
+python tests/test_converter_core.py   # 27/27 passed
 ```
 
 覆盖：8 方向转换（含 s2twp/tw2sp 台湾用词）、词组优先、标点保留、
