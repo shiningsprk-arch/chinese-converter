@@ -619,7 +619,7 @@ class AdminChineseConverterConvert(BaseHandler):
         book_id = data.get("book_id")
         direction = (data.get("direction") or "t2s").strip()
         mode = (data.get("mode") or "book").strip()
-        use_a5 = bool(data.get("use_a5", True))
+        use_a5 = bool(data.get("use_a5", False))
         convert_title = bool(data.get("convert_title", True))
         backup = bool(data.get("backup", False))
 

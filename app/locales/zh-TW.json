@@ -1502,7 +1502,7 @@
   "chineseConverter": {
     "title": "繁簡轉換",
     "close": "關閉",
-    "hint": "對書庫中的書籍執行簡體↔繁體中文轉換。支援 EPUB / TXT 格式與 6 種轉換方向（OpenCC 標準），可選用「a5566123s 個人修正版」增強詞表；可另存為新書或替換原書（可選備份）。",
+    "hint": "對書庫中的書籍執行簡體↔繁體中文轉換。支援 EPUB / TXT 格式與 8 種轉換方向（OpenCC 標準），可選用「a5566123s 個人修正版」增強詞表；可另存為新書或替換原書（可選備份）。",
     "selectBook": "搜尋並選擇書籍",
     "noResults": "找不到相關書籍",
     "direction": "轉換方向",
@@ -1529,6 +1529,10 @@
     "progressSaving": "正在保存結果…",
     "stageCompleted": "已完成",
     "convertCompleted": "轉換完成！可在書庫中查看結果",
-    "convertFailed": "轉換失敗"
+    "convertFailed": "轉換失敗",
+    "pollLost": "無法取得任務狀態（可能已被重置），請稍後重試",
+    "pollTimeout": "等待逾時，任務可能仍在背景執行，完成後會有訊息通知",
+    "dirTW2SP": "台灣繁體（含台灣用詞）→ 簡體",
+    "dirS2TWP": "簡體 → 台灣繁體（含台灣用詞）"
   }
 }

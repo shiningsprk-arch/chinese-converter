@@ -11,18 +11,21 @@ MyBooks Toolbox 工具：对书库中的书籍执行 **简体 ↔ 繁体中文�
 
 ## 功能特性
 
-1. **6 种转换方向**（OpenCC 标准配置）
+1. **8 种转换方向**（OpenCC 标准配置）
    - `t2s` 繁体 → 简体（默认）
    - `tw2s` 台湾繁体 → 简体
+   - `tw2sp` 台湾繁体（含台湾用词） → 简体
    - `s2t` 简体 → 繁体
    - `s2tw` 简体 → 台湾繁体
+   - `s2twp` 简体 → 台湾繁体（含台湾用词）
    - `t2tw` 繁体 → 台湾繁体
    - `tw2t` 台湾繁体 → 繁体
 2. **增强词表**（可选）：a5566123s/Calibre-BIG5toGBK 个人修正版，约 5000 条繁→简词条
    （如 `幹麼→干嘛`、`達文西密碼→《达·芬奇密码》`），优先于默认词表匹配；仅对繁→简方向生效
-3. **EPUB 无损处理**：zip 条目级处理，仅转换正文 HTML 文本节点与 OPF/NCX 标题文本；
+3. **EPUB 无损处理**：zip 条目级处理，仅转换正文 HTML 文本节点与 OPF/NCX 元数据文本
+   （机器标识符 `dc:identifier` 除外；注释、CDATA、script/style 内容原样保留）；
    样式、图片、字体等原样保留；重新打包符合 EPUB 规范（`mimetype` 置首、不压缩）
-4. **TXT 编码自动探测**：UTF-8（含 BOM）/ GB18030，输出统一 UTF-8
+4. **TXT 编码自动探测**：UTF-8（含 BOM）/ GB18030 / BIG5 择优，输出统一 UTF-8
 5. **两种输出方式**：
    - **另存为新书**（默认）：转换结果作为新书籍入库（标题加「（简体版）/（繁體版）」后缀），完整继承原书元数据（标签、系列、评分、评论、语言、封面、自定义列等），保留原书
    - **替换原书**：覆盖原 EPUB/TXT 文件（book_id 不变），可选备份原文件到工具工作目录
@@ -40,12 +43,12 @@ webserver/
         ├── opencc_engine.py     移植 opencc-python 引擎（Apache 2.0）
         ├── epub_converter.py    EPUB/TXT 无损转换
         ├── a5_phrases.txt       增强词表（解析自 a5566123s csr）
-        ├── config/              6 个转换方向配置 json
+        ├── config/              8 个转换方向配置 json
         └── dictionary/          OpenCC 字典数据
 app/
 ├── src/pages/toolbox/chinese_converter.vue   (新增) Vuetify 2 页面
 └── locales/{en,zh,zh-TW}.json                (修改) chineseConverter 块
-tests/test_converter_core.py                  (新增) 16 个单元测试
+tests/test_converter_core.py                  (新增) 27 个单元测试
 ```
 
 ## 安装部署（3 处修改 + 1 处新增页面）
@@ -104,10 +107,12 @@ Nuxt 2 自动路由：`/toolbox/chinese_converter`（由 `app/src/pages/toolbox/
 
 ```bash
 python tests/test_converter_core.py
-# 16/16 tests passed
+# 27/27 tests passed
 ```
 
-也可命令行试用转换效果：
+也可命令行试用转换效果（需在完整 mybooks 环境内运行——该入口 import
+`webserver.utils` 等宿主模块，独立 checkout 下不可用；核心包
+`webserver/toolbox/chinese_converter/` 无此依赖，可自行封装脚本调用）：
 
 ```bash
 python -m webserver.toolbox.chinese_converter_tool t2s some_book.epub --a5

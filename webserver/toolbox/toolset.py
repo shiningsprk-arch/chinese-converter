@@ -1,12 +1,12 @@
 """
 工具管理类，所有工具进行注册
 
-@author: PoxenStudio, 2026
+@author: shiningsprk-arch, 2026
 """
 
 
 class Tool:
-    def __init__(self, id: str, name: str, description: str, revision: str, author: str, publish_date: str = "", page: str = ""):
+    def __init__(self, id: str, name: str, description: str, revision: str, author: str, publish_date: str = "", page: str = "", repo_url: str = ""):
         self._id = id
         self._name = name
         self._description = description
@@ -14,6 +14,10 @@ class Tool:
         self._author = author
         self._publish_date = publish_date
         self._page = page
+        # 工具源码仓库地址，供审核/溯源使用，见 document/Toolbox_Dynamic_Design.md 3.2 节。
+        # 外部插件的 manifest.json 里是必填字段；14 个内置工具尚未逐个补充，暂时允许为空，
+        # 不在 ToolSet.register() 里强制校验，避免一次性改动全部内置工具的 info()。
+        self._repo_url = repo_url
 
     @property
     def id(self) -> str:
@@ -71,6 +75,14 @@ class Tool:
     def page(self, value: str):
         self._page = value
 
+    @property
+    def repo_url(self) -> str:
+        return self._repo_url
+
+    @repo_url.setter
+    def repo_url(self, value: str):
+        self._repo_url = value
+
     def to_dict(self) -> dict:
         return {
             "id": self._id,
@@ -80,6 +92,7 @@ class Tool:
             "author": self._author,
             "publish_date": self._publish_date,
             "page": self._page,
+            "repo_url": self._repo_url,
         }
 
 
@@ -99,20 +112,28 @@ class ToolSet:
         from .author_clean_tool import AuthorCleanTool
         from .mimo_tts import MimoTTSTool
         from .bookbarn_acceptor_tool import BookBarnAcceptorTool
+        from .text_replace import TextReplaceTool
+        from .txt_encoding_fixer import TxtEncodingFixerTool
         from .chinese_converter_tool import ChineseConverterTool
+        from .epub_beautify import EpubBeautifyTool
+        from .epub_merge import EpubMergeTool
 
         ToolSet.register(MergeFormatsTool.info())
-        ToolSet.register(ReviewBookLanguageTool.info())
-        ToolSet.register(MinifyPdfTool.info())
+        ToolSet.register(EpubBeautifyTool.info())
+        ToolSet.register(EpubMergeTool.info())
+        ToolSet.register(MimoTTSTool.info())
+        ToolSet.register(TextReplaceTool.info())
+        ToolSet.register(TxtEncodingFixerTool.info())
+        ToolSet.register(ChineseConverterTool.info())
         ToolSet.register(TextProcessor.info())
         ToolSet.register(FormatsPruningTool.info())
-        ToolSet.register(EpubFixerTool.info())
         ToolSet.register(EpubSplitTool.info())
         ToolSet.register(AuthorCleanTool.info())
-        ToolSet.register(MimoTTSTool.info())
         ToolSet.register(RareBookDownloader.info())
+        ToolSet.register(ReviewBookLanguageTool.info())
+        ToolSet.register(EpubFixerTool.info())
+        ToolSet.register(MinifyPdfTool.info())
         ToolSet.register(BookBarnAcceptorTool.info())
-        ToolSet.register(ChineseConverterTool.info())
 
         MinifyPdfTool.cleanup_old_files()
 
@@ -128,9 +149,14 @@ class ToolSet:
             revision=info["revision"],
             author=info["author"],
             publish_date=info.get("publish_date", ""),
-            page=info.get("page", "")
+            page=info.get("page", ""),
+            repo_url=info.get("repo_url", ""),
         )
         ToolSet._tool_set[info["tool_id"]] = tool
+
+    @staticmethod
+    def unregister(tool_id: str) -> None:
+        ToolSet._tool_set.pop(tool_id, None)
 
     @staticmethod
     def all_tools() -> list[Tool]:

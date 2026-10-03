@@ -12,7 +12,9 @@
 ### 1. 转换引擎（移植 opencc-python，Apache 2.0）
 - 移植 Hopkins1/TradSimpChinese（calibre 插件）内的 opencc-python 引擎：
   StringTree **最长匹配**、多字典 group 链、词典缓存
-- 支持 6 个 OpenCC 标准方向：`t2s / tw2s / s2t / s2tw / t2tw / tw2t`
+- 支持 8 个 OpenCC 标准方向：`t2s / tw2s / tw2sp / s2t / s2tw / s2twp / t2tw / tw2t`
+  （`s2twp` / `tw2sp` 为含台湾地区用词的简↔台繁方向，词表为官方 OpenCC
+  `TWPhrases.txt` / `TWPhrasesRev.txt`，如 `軟件→軟體`、`滑鼠→鼠標`）
 - 字典与配置数据直接复制自 OpenCC（文件头保留 License 注释），**零新增依赖**
   （引擎仅用标准库，HTML 解析复用 mybooks 已有的 beautifulsoup4）
 
@@ -89,21 +91,22 @@
 ## 六、测试
 
 ```bash
-python tests/test_converter_core.py   # 16/16 passed
+python tests/test_converter_core.py   # 20/20 passed
 ```
 
-覆盖：6 方向转换、词组优先、标点保留、a5 增强词表生效与方向隔离、
+覆盖：8 方向转换（含 s2twp/tw2sp 台湾用词）、词组优先、标点保留、
+a5 增强词表生效与方向隔离、
 EPUB 无损（mimetype 顺序/STORED、script 保留、XML 声明保留、元数据开关）、
 TXT UTF-8/GB18030 探测、非法方向报错。
 
 ## 七、已知限制
 
-- 台湾地区词汇（如 `軟體→软件`）不在 opencc-python 词典转换链上（数据版本限制），
-  部分由增强词表覆盖；如需完整词汇转换可自行补充词条
 - s2t 多候选取词典第一个候选（与原版 opencc-python 行为一致）
+- 台湾用词表（TWPhrases）随 OpenCC 上游数据版本更新，个别新词可能滞后
+- OPF/NCX 重新打包时 lxml 序列化会重写 XML 声明，standalone 属性不保留（仅影响外部 DTD 依赖声明，阅读器实际解码不受影响）
 
 ## 八、许可
 
 - 引擎与字典数据：Apache License 2.0（opencc-python / OpenCC，保留头部注释）
-- 增强词表：a5566123s 个人修正版（来源注明，见 LICENSE.md）
-- 工具集成代码：GPLv3
+- 增强词表：a5566123s 个人修正版（来源注明）
+- 工具集成代码：AGPL-3.0（全文见 [LICENSE.md](LICENSE.md)；第三方组件来源与边界见 [NOTICE.md](NOTICE.md)）

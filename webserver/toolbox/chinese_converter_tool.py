@@ -14,6 +14,7 @@ import logging
 import os
 import shutil
 import threading
+import time
 import traceback
 from typing import Optional
 
@@ -30,17 +31,19 @@ from webserver.services import AsyncService
 from webserver.services.background_service import BackgroundService, BackgroundTask
 from webserver.toolbox.base_tool import BaseTool
 from webserver.toolbox.chinese_converter.epub_converter import convert_epub, convert_txt_file
-from webserver.toolbox.chinese_converter.opencc_engine import OpenCC
+from webserver.toolbox.chinese_converter.opencc_engine import DIRECTION_LABELS, OpenCC
 
 # 支持的方向（与 opencc 配置一致）
-DIRECTIONS = ("t2s", "tw2s", "s2t", "s2tw", "t2tw", "tw2t")
+DIRECTIONS = ("t2s", "tw2s", "tw2sp", "s2t", "s2tw", "s2twp", "t2tw", "tw2t")
 
 # 方向 → 目标语言代码（calibre 语言码：zh=简体，zht=繁体）
 DIRECTION_LANG = {
     "t2s": "zh",
     "tw2s": "zh",
+    "tw2sp": "zh",
     "s2t": "zht",
     "s2tw": "zht",
+    "s2twp": "zht",
     "t2tw": "zht",
     "tw2t": "zht",
 }
@@ -79,7 +82,7 @@ class ChineseConverterTool(BaseTool):
         return {
             "tool_id": "chinese_converter",
             "name": "繁简转换",
-            "description": "对书库中的书籍执行简体↔繁体中文转换（支持 EPUB/TXT，6 种转换方向，可选增强词表），"
+            "description": "对书库中的书籍执行简体↔繁体中文转换（支持 EPUB/TXT，8 种转换方向，可选增强词表），"
                            "可另存为新书（完整继承原书元数据）或替换原书（可选备份）",
             "revision": "0.1.0",
             "author": "黏菌",
@@ -103,7 +106,7 @@ class ChineseConverterTool(BaseTool):
         """执行繁简转换，通过 register_service 在后台线程中运行。
 
         :param book_id:       Calibre 书籍 ID
-        :param direction:     转换方向（t2s/tw2s/s2t/s2tw/t2tw/tw2t）
+        :param direction:     转换方向（t2s/tw2s/tw2sp/s2t/s2tw/s2twp/t2tw/tw2t）
         :param mode:          "book"=另存为新书（默认），"replace"=替换原书
         :param use_a5:        是否启用增强词表（仅繁→简方向生效）
         :param convert_title: 是否转换书名/目录等元数据文本
@@ -115,16 +118,19 @@ class ChineseConverterTool(BaseTool):
                             book_id, user_id)
             return
 
-        task_id = self.create_task(progress_data={
-            "status": "starting", "book_id": book_id,
-            "direction": direction, "mode": mode,
-        })
-        ChineseConverterTool._last_task_id = task_id
+        # create_task 等全部放入 try：若中途抛异常，finally 仍会释放锁
+        task_id = None
         error_message = None
         book_title = "Unknown"
 
         try:
-            books = self.db.get_data_as_dict(ids=[book_id])
+            task_id = self.create_task(progress_data={
+                "status": "starting", "book_id": book_id,
+                "direction": direction, "mode": mode,
+            })
+            ChineseConverterTool._last_task_id = task_id
+
+            books = self.api.calibre.get_data_as_dict([book_id])
             if not books:
                 error_message = _("书籍不存在：ID=%d") % book_id
                 logging.error("[ChineseConverterTool] Book not found: ID=%d [uid:%d]", book_id, user_id)
@@ -139,7 +145,7 @@ class ChineseConverterTool(BaseTool):
                 logging.error("[ChineseConverterTool] No EPUB/TXT format for book_id=%d [uid:%d]", book_id, user_id)
                 return
 
-            src_path = self.db.format_abspath(book_id, fmt, index_is_id=True)
+            src_path = self.api.calibre.format_abspath(book_id, fmt)
             if not src_path or not os.path.exists(src_path):
                 error_message = _("找不到 %s 文件，可能已被移除") % fmt
                 logging.error("[ChineseConverterTool] %s file missing for book_id=%d [uid:%d]",
@@ -198,22 +204,31 @@ class ChineseConverterTool(BaseTool):
             logging.error("[ChineseConverterTool] Convert failed for book_id=%d: %s", book_id, err)
             logging.error(traceback.format_exc())
         finally:
-            self.complete_task(task_id, error_message=error_message)
+            # create_task 失败时 task_id 为 None，跳过任务收尾（锁仍必须释放）
+            if task_id is not None:
+                self.complete_task(task_id, error_message=error_message)
             ChineseConverterTool._convert_lock.release()
 
     # ── 输出处理 ────────────────────────────────────────────
 
     def _replace_format(self, book_id: int, fmt: str, out_path: str,
                         backup: bool, work_dir: str) -> Optional[int]:
-        """替换原书格式；可选备份；返回新 book_id（None 表示原位替换）。"""
+        """替换原书格式；可选备份；返回新 book_id（None 表示原位替换）。
+
+        备份保存在独立持久目录（``get_work_dir("backups")``），不随 work_dir
+        清理，避免成功路径清理临时目录时误删备份。
+        """
         if backup:
-            backup_path = os.path.join(work_dir, "backup." + fmt.lower())
-            calibre_path = self.db.format_abspath(book_id, fmt, index_is_id=True)
+            backup_dir = self.get_work_dir("backups")
+            backup_path = os.path.join(
+                backup_dir, "backup_%d_%s_%d.%s" % (
+                    book_id, fmt.lower(), int(time.time()), fmt.lower()))
+            calibre_path = self.api.calibre.format_abspath(book_id, fmt)
             if calibre_path and os.path.exists(calibre_path):
                 shutil.copy2(calibre_path, backup_path)
                 logging.info("[ChineseConverterTool] Backed up %s to %s", fmt, backup_path)
         with open(out_path, "rb") as f:
-            self.db.add_format(book_id, fmt, f, index_is_id=True)
+            self.api.calibre.add_format(book_id, fmt, f)
         logging.info("[ChineseConverterTool] Replaced %s for book_id=%d", fmt, book_id)
         try:
             os.remove(out_path)
@@ -228,8 +243,7 @@ class ChineseConverterTool(BaseTool):
         评论、语言、封面、自定义列等），返回新书 book_id。"""
         # get_metadata 每次返回全新对象，可直接原地修改（勿 deepcopy，
         # 其内部挂有指向 Cache 的代理，深拷贝不安全）
-        mi = self.db.get_metadata(book_id, index_is_id=True, get_cover=True)
-        cover_bytes = getattr(mi, "cover", None)
+        mi = self.api.calibre.get_metadata(book_id, get_cover=True, cover_as_data=True)
 
         suffix = NEW_BOOK_SUFFIX.get(DIRECTION_LANG.get(direction, "zh"), "（新版本）")
         title = (mi.title or "Unknown").strip()
@@ -240,13 +254,21 @@ class ChineseConverterTool(BaseTool):
         if convert_title and mi.authors:
             mi.authors = [engine.convert(a) for a in mi.authors]
             mi.author_sort = None  # 名字已转换，排序键由 calibre 按新名字重算
+        if convert_title:
+            # 简介/出版社/丛书/标签同步转换（简介可能含 HTML：opencc 逐字符
+            # 转换，标签与实体为 ASCII 不受影响）
+            if mi.comments:
+                mi.comments = engine.convert(mi.comments)
+            if mi.publisher:
+                mi.publisher = engine.convert(mi.publisher)
+            if mi.series:
+                mi.series = engine.convert(mi.series)
+            if mi.tags:
+                mi.tags = [engine.convert(t) for t in mi.tags]
         mi.languages = [DIRECTION_LANG.get(direction, "zh")]
         mi.uuid = None  # 新书应使用独立 UUID，避免与原书冲突
-        # calibre 的 add_books 仅通过 cover_data 写入封面，必须显式填充
-        if cover_bytes:
-            mi.cover_data = (None, cover_bytes)
 
-        new_book_id = self.db.import_book(mi, [out_path])
+        new_book_id = self.api.calibre.import_book(mi, [out_path])
         if new_book_id is None:
             raise RuntimeError(_("导入文件失败，Calibre未返回书籍ID"))
 
@@ -264,7 +286,7 @@ class ChineseConverterTool(BaseTool):
         for col in (CALIBRE_COLUMN_CATEGORY, CALIBRE_COLUMN_EXT_LINK,
                     CALIBRE_COLUMN_LOCATION, CALIBRE_COLUMN_DYNAMIC_COVER):
             try:
-                val = self.db.get_custom(book_id, label=col, index_is_id=True)
+                val = self.api.calibre.get_custom(book_id, col)
             except Exception as err:
                 logging.warning("[ChineseConverterTool] Failed to read %s of book_id=%d: %s",
                                 col, book_id, err)
@@ -272,10 +294,12 @@ class ChineseConverterTool(BaseTool):
             if val in (None, ""):
                 continue
             try:
-                self.db.new_api.set_field(col, {new_book_id: val})
+                self.api.calibre.set_custom(col, {new_book_id: val})
             except Exception as err:
                 logging.warning("[ChineseConverterTool] Failed to copy %s to new book_id=%d: %s",
                                 col, new_book_id, err)
+
+        self.cleanup_work_dir(os.path.dirname(out_path))
 
         try:
             os.remove(out_path)
@@ -290,7 +314,7 @@ class ChineseConverterTool(BaseTool):
         """替换模式下同步库内标题/作者/语言（不加后缀），保持与转换后文件一致。
         封面不受影响：set_metadata 只会更新提供的封面、从不删除现有封面。"""
         try:
-            mi = self.db.get_metadata(book_id, index_is_id=True)
+            mi = self.api.calibre.get_metadata(book_id)
             if mi.title:
                 mi.title = engine.convert(mi.title)
             mi.title = mi.title or "Unknown"
@@ -298,8 +322,18 @@ class ChineseConverterTool(BaseTool):
             if mi.authors:
                 mi.authors = [engine.convert(a) for a in mi.authors]
                 mi.author_sort = None  # 名字已转换，排序键由 calibre 按新名字重算
+            # 简介/出版社/丛书/标签同步转换（简介可能含 HTML：opencc 逐字符
+            # 转换，标签与实体为 ASCII 不受影响）
+            if mi.comments:
+                mi.comments = engine.convert(mi.comments)
+            if mi.publisher:
+                mi.publisher = engine.convert(mi.publisher)
+            if mi.series:
+                mi.series = engine.convert(mi.series)
+            if mi.tags:
+                mi.tags = [engine.convert(t) for t in mi.tags]
             mi.languages = [DIRECTION_LANG.get(direction, "zh")]
-            self.db.set_metadata(book_id, mi, force_changes=True)
+            self.api.calibre.set_metadata(book_id, mi, force_changes=True)
             logging.info("[ChineseConverterTool] Updated title/authors/language for book_id=%d", book_id)
         except Exception as err:
             logging.warning("[ChineseConverterTool] Failed to update title for book_id=%d: %s",
@@ -315,15 +349,7 @@ class ChineseConverterTool(BaseTool):
 
     @staticmethod
     def _direction_label(direction: str) -> str:
-        labels = {
-            "t2s": "繁体→简体",
-            "tw2s": "台湾繁体→简体",
-            "s2t": "简体→繁体",
-            "s2tw": "简体→台湾繁体",
-            "t2tw": "繁体→台湾繁体",
-            "tw2t": "台湾繁体→繁体",
-        }
-        return labels.get(direction, direction)
+        return DIRECTION_LABELS.get(direction, direction)
 
 
 if __name__ == "__main__":

@@ -1502,7 +1502,7 @@
   "chineseConverter": {
     "title": "Chinese Converter",
     "close": "Close",
-    "hint": "Convert books between Simplified and Traditional Chinese. Supports EPUB / TXT formats, 6 OpenCC-standard directions, and an optional enhanced phrase table (a5566123s personal revision). Output as a new book or replace the original (with optional backup).",
+    "hint": "Convert books between Simplified and Traditional Chinese. Supports EPUB / TXT formats, 8 OpenCC-standard directions, and an optional enhanced phrase table (a5566123s personal revision). Output as a new book or replace the original (with optional backup).",
     "selectBook": "Search and select a book",
     "noResults": "No books found",
     "direction": "Conversion direction",
@@ -1529,6 +1529,10 @@
     "progressSaving": "Saving result…",
     "stageCompleted": "Completed",
     "convertCompleted": "Conversion finished! Check your library for the result",
-    "convertFailed": "Conversion failed"
+    "convertFailed": "Conversion failed",
+    "pollLost": "Could not fetch task status (it may have been reset). Please try again later",
+    "pollTimeout": "Timed out waiting for the task — it may still be running in the background and will notify you when done",
+    "dirTW2SP": "Taiwan Traditional (with phrases) → Simplified",
+    "dirS2TWP": "Simplified → Taiwan Traditional (with phrases)"
   }
 }
