@@ -109,4 +109,4 @@ TXT UTF-8/GB18030 探测、非法方向报错。
 
 - 引擎与字典数据：Apache License 2.0（opencc-python / OpenCC，保留头部注释）
 - 增强词表：a5566123s 个人修正版（来源注明）
-- 工具集成代码：AGPL-3.0（全文见 [LICENSE.md](LICENSE.md)；第三方组件来源与边界见 [NOTICE.md](NOTICE.md)）
+- 工具集成代码：BSD 2-Clause（全文见 [LICENSE.md](LICENSE.md)）
