@@ -126,7 +126,7 @@ python -m webserver.toolbox.chinese_converter_tool s2t some_book.txt
 - **OpenCC 字典与配置数据**：https://github.com/BYVoid/OpenCC （Apache License 2.0）
 - **增强词表**：https://github.com/a5566123s/Calibre-BIG5toGBK 的 csr 查找替换表
   （繁转简个人修正版，原帖 hi-pda 论坛），仅供个人使用，使用前请自行评估
-- 许可：BSD 2-Clause（与上游 MyBooks 项目一致，全文见 `LICENSE.md`）
+- 许可：BSD 2-Clause（与上游 MyBooks 项目一致，全文见 `LICENSE.md`）；第三方组件来源与边界详见 `NOTICE.md`
 
 ## 已知限制
 
